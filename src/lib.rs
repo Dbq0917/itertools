@@ -117,6 +117,8 @@ pub mod structs {
     #[cfg(feature = "use_alloc")]
     pub use crate::groupbylazy::{Chunk, ChunkBy, Chunks, Group, Groups, IntoChunks};
     #[cfg(feature = "use_std")]
+    pub use crate::groupbylazy::{ChunkByStrict, StrictGroups};
+    #[cfg(feature = "use_std")]
     pub use crate::grouping_map::{GroupingMap, GroupingMapBy};
     pub use crate::intersperse::{Intersperse, IntersperseWith};
     #[cfg(feature = "use_alloc")]
@@ -698,6 +700,16 @@ pub trait Itertools: Iterator {
     /// Consecutive elements that map to the same key (“runs”), are assigned
     /// to the same group.
     ///
+    /// Only **consecutive** elements are merged, so the iterator is expected
+    /// to be sorted (or at least partitioned) by the grouping key. If the same
+    /// key occurs in several separated runs, it is yielded in several groups
+    /// rather than one: for example `[1, 1, 2, 1]` groups into the three
+    /// groups `1, 2, 1`, not `1, 2`. Downstream code that relies on unique
+    /// group keys must therefore sort by key first, or use
+    /// [`.chunk_by_strict()`](Itertools::chunk_by_strict), which panics when
+    /// the input violates this precondition instead of silently emitting
+    /// duplicate keys.
+    ///
     /// `ChunkBy` is the storage for the lazy grouping operation.
     ///
     /// If the groups are consumed in order, or if each group's iterator is
@@ -736,6 +748,64 @@ pub trait Itertools: Iterator {
         K: PartialEq,
     {
         groupbylazy::new(self, key)
+    }
+
+    /// Return an *iterable* that groups iterator elements like
+    /// [`.chunk_by()`](Itertools::chunk_by), but verifies that the input is
+    /// sorted by key.
+    ///
+    /// Consecutive elements that map to the same key are assigned to the
+    /// same group. In addition, every group key that has already been yielded
+    /// is remembered; when a later group reuses a key, iteration **panics**
+    /// with a message describing the unsorted input. This turns the silent
+    /// duplicate-key output of `chunk_by` into an immediate failure at the
+    /// grouping site, instead of an obscure unique-key conflict much further
+    /// downstream (for example when inserting the groups into a database).
+    ///
+    /// Only the distinct keys are remembered, never the elements themselves,
+    /// so the additional memory is `O(number of distinct keys)` rather than
+    /// `O(stream length)`; the whole stream does not need to be buffered.
+    ///
+    /// The grouping key must be cloneable, comparable and hashable. To group
+    /// unsorted data without panicking, sort it by key first and then use
+    /// [`.chunk_by()`](Itertools::chunk_by).
+    ///
+    /// Iterator element type is `(K, Group)`: the group's key and the
+    /// group iterator.
+    ///
+    /// ```
+    /// use itertools::Itertools;
+    ///
+    /// // sorted input groups normally
+    /// let data = vec![1, 1, 2, 2, 3];
+    /// let grouped: Vec<(i32, Vec<i32>)> = (&data.into_iter().chunk_by_strict(|elt| *elt))
+    ///     .into_iter()
+    ///     .map(|(key, group)| (key, group.collect()))
+    ///     .collect();
+    /// assert_eq!(
+    ///     grouped,
+    ///     vec![(1, vec![1, 1]), (2, vec![2, 2]), (3, vec![3])]
+    /// );
+    /// ```
+    ///
+    /// Unsorted input fails fast while iterating:
+    ///
+    /// ```should_panic
+    /// use itertools::Itertools;
+    ///
+    /// let data = vec![1, 2, 1];
+    /// for (key, group) in &data.into_iter().chunk_by_strict(|elt| *elt) {
+    ///     let _ = (key, group.collect::<Vec<_>>());
+    /// }
+    /// ```
+    #[cfg(feature = "use_std")]
+    fn chunk_by_strict<K, F>(self, key: F) -> ChunkByStrict<K, Self, F>
+    where
+        Self: Sized,
+        F: FnMut(&Self::Item) -> K,
+        K: PartialEq + Clone + Eq + Hash,
+    {
+        groupbylazy::new(self, key).into_strict()
     }
 
     /// See [`.chunk_by()`](Itertools::chunk_by).

@@ -9,6 +9,7 @@
 ### Added
 - Add `*_with_hasher` adaptors (#1007)
 - Add strip_prefix and strip_prefix_by methods (#1104)
+- Add `chunk_by_strict` which panics on unsorted input instead of yielding duplicate group keys
 
 ### Changed
 - Remove `Clone` bounds from `tuple_combinations` and `array_combinations`(#1011)

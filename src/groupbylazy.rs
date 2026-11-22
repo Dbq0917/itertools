@@ -1,6 +1,10 @@
 use alloc::vec::{self, Vec};
 use std::cell::{Cell, RefCell};
+#[cfg(feature = "use_std")]
+use std::collections::HashSet;
 use std::fmt::Debug;
+#[cfg(feature = "use_std")]
+use std::hash::Hash;
 
 /// A trait to unify `FnMut` for `ChunkBy` with the chunk key in `IntoChunks`
 trait KeyFunction<A> {
@@ -376,6 +380,20 @@ where
     fn drop_group(&self, client: usize) {
         self.inner.borrow_mut().drop_group(client);
     }
+
+    /// Turn this grouping into one that verifies the input is sorted by key:
+    /// every group key that has already been produced is remembered, and
+    /// iteration panics as soon as a key shows up in a later group.
+    #[cfg(feature = "use_std")]
+    pub fn into_strict(self) -> ChunkByStrict<K, I, F>
+    where
+        K: Clone + Eq + Hash,
+    {
+        ChunkByStrict {
+            chunk_by: self,
+            seen: RefCell::new(HashSet::new()),
+        }
+    }
 }
 
 impl<'a, K, I, F> IntoIterator for &'a ChunkBy<K, I, F>
@@ -495,6 +513,127 @@ where
             return elt;
         }
         self.parent.step(self.index)
+    }
+}
+
+///// ChunkByStrict /////
+
+/// `ChunkByStrict` wraps [`ChunkBy`] and detects unsorted input.
+///
+/// Plain [`ChunkBy`] only merges *consecutive* elements with the same key,
+/// so an input that is not sorted by key silently produces several groups
+/// carrying the same key. This type keeps track of every group key that has
+/// already been produced and panics as soon as a later group reuses a key,
+/// turning the otherwise delayed failure (for example a unique-key violation
+/// when inserting the groups into a database) into an immediate, descriptive
+/// error at the grouping site.
+///
+/// Only the distinct group keys are stored, never the underlying stream:
+/// memory usage is `O(number of distinct keys)`, not `O(stream length)`, so
+/// unbounded inputs stay supported as long as the number of distinct keys
+/// stays bounded.
+///
+/// Like [`ChunkBy`], this type implements [`IntoIterator`] by reference.
+///
+/// See [`.chunk_by_strict()`](crate::Itertools::chunk_by_strict) for more
+/// information.
+#[cfg(feature = "use_std")]
+#[must_use = "iterator adaptors are lazy and do nothing unless consumed"]
+pub struct ChunkByStrict<K, I, F>
+where
+    I: Iterator,
+{
+    chunk_by: ChunkBy<K, I, F>,
+    seen: RefCell<HashSet<K>>,
+}
+
+#[cfg(feature = "use_std")]
+impl<K, I, F> Debug for ChunkByStrict<K, I, F>
+where
+    K: Debug,
+    I: Iterator + Debug,
+    I::Item: Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChunkByStrict")
+            .field("chunk_by", &self.chunk_by)
+            .field("seen", &self.seen.borrow())
+            .finish()
+    }
+}
+
+#[cfg(feature = "use_std")]
+impl<'a, K, I, F> IntoIterator for &'a ChunkByStrict<K, I, F>
+where
+    I: Iterator,
+    I::Item: 'a,
+    F: FnMut(&I::Item) -> K,
+    K: PartialEq + Clone + Eq + Hash,
+{
+    type Item = (K, Group<'a, K, I, F>);
+    type IntoIter = StrictGroups<'a, K, I, F>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        StrictGroups {
+            groups: (&self.chunk_by).into_iter(),
+            seen: &self.seen,
+        }
+    }
+}
+
+/// An iterator that yields the groups of a [`ChunkByStrict`], rejecting any
+/// group whose key was already produced by an earlier group.
+///
+/// **Panics** when a group key is encountered more than once.
+#[cfg(feature = "use_std")]
+#[must_use = "iterator adaptors are lazy and do nothing unless consumed"]
+pub struct StrictGroups<'a, K, I, F>
+where
+    I: Iterator + 'a,
+    I::Item: 'a,
+    K: 'a,
+    F: 'a,
+{
+    groups: Groups<'a, K, I, F>,
+    seen: &'a RefCell<HashSet<K>>,
+}
+
+#[cfg(feature = "use_std")]
+impl<'a, K, I, F> Debug for StrictGroups<'a, K, I, F>
+where
+    K: Debug,
+    I: Iterator + Debug,
+    I::Item: Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StrictGroups")
+            .field("groups", &self.groups)
+            .field("seen", &self.seen.borrow())
+            .finish()
+    }
+}
+
+#[cfg(feature = "use_std")]
+impl<'a, K, I, F> Iterator for StrictGroups<'a, K, I, F>
+where
+    I: Iterator,
+    I::Item: 'a,
+    F: FnMut(&I::Item) -> K,
+    K: PartialEq + Clone + Eq + Hash,
+{
+    type Item = (K, Group<'a, K, I, F>);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.groups.next().map(|(key, group)| {
+            if !self.seen.borrow_mut().insert(key.clone()) {
+                panic!(
+                    "chunk_by_strict: input is not sorted by key: \
+                     the same key appears in more than one group"
+                );
+            }
+            (key, group)
+        })
     }
 }
 

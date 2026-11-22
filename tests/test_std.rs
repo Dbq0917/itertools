@@ -989,6 +989,63 @@ fn chunk_by() {
 }
 
 #[test]
+fn chunk_by_unsorted_input_splits_groups() {
+    // Keys come from an externally imported file, so ordering is not
+    // guaranteed. With unsorted input the plain adjacent-merge behaviour
+    // yields the same key more than once.
+    let rows = [("a", 1), ("b", 2), ("a", 3), ("c", 4), ("b", 5)];
+
+    let keys: Vec<&str> = rows
+        .iter()
+        .chunk_by(|row| row.0)
+        .into_iter()
+        .map(|(key, _group)| key)
+        .collect();
+
+    // "a" and "b" each show up in two separate runs.
+    assert_eq!(keys, vec!["a", "b", "a", "c", "b"]);
+
+    let occurrences = keys.iter().fold(HashMap::new(), |mut counts, key| {
+        *counts.entry(*key).or_insert(0) += 1;
+        counts
+    });
+    assert_eq!(occurrences[&"a"], 2);
+    assert_eq!(occurrences[&"b"], 2);
+    assert_eq!(occurrences[&"c"], 1);
+}
+
+#[test]
+fn chunk_by_strict_sorted_input() {
+    let rows = [("a", 1), ("a", 2), ("b", 3), ("c", 4), ("c", 5)];
+
+    let grouped: Vec<(&str, Vec<i32>)> = (&rows.iter().chunk_by_strict(|row| row.0))
+        .into_iter()
+        .map(|(key, group)| (key, group.map(|row| row.1).collect()))
+        .collect();
+
+    assert_eq!(
+        grouped,
+        vec![("a", vec![1, 2]), ("b", vec![3]), ("c", vec![4, 5]),]
+    );
+}
+
+#[test]
+#[should_panic(
+    expected = "chunk_by_strict: input is not sorted by key: the same key appears in more than one group"
+)]
+fn chunk_by_strict_panics_on_unsorted_input() {
+    let rows = [("a", 1), ("b", 2), ("a", 3)];
+
+    // The second "a" group is detected immediately instead of leaking a
+    // duplicate key into the unique-key insertion downstream.
+    let grouper = rows.iter().chunk_by_strict(|row| row.0);
+    // Panic happens lazily while the groups are produced.
+    for (_key, group) in &grouper {
+        for _row in group {}
+    }
+}
+
+#[test]
 fn chunk_by_lazy_2() {
     let data = [0, 1];
     let chunks = data.iter().chunk_by(|k| *k);
